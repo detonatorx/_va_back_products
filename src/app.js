@@ -10,7 +10,7 @@ const columns =
 const dishQuery = `SELECT ${columns}, COALESCE((SELECT json_agg(json_build_object(
   'id', p.id, 'url', CASE WHEN p.external_url <> '' THEN p.external_url ELSE '/api/photos/' || p.id::text || '?v=' || floor(extract(epoch from p.updated_at) * 1000)::bigint::text END,
   'is_primary', p.is_primary, 'can_edit', p.original_image_data IS NOT NULL)
-  ORDER BY p.is_primary DESC, p.created_at, p.id)
+  ORDER BY p.position, p.created_at, p.id)
   FROM dish_photos p WHERE p.dish_id = d.id), '[]'::json) AS photos FROM dishes d`;
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -33,6 +33,20 @@ async function processImage(buffer) {
 async function getDish(db, id) {
   const { rows } = await db.query(`${dishQuery} WHERE d.id=$1`, [id]);
   return rows[0];
+}
+
+async function applyPhotoOrder(client, dishId, photoIds) {
+  await client.query('UPDATE dish_photos SET is_primary=false WHERE dish_id=$1 AND is_primary', [
+    dishId
+  ]);
+  await client.query(
+    `UPDATE dish_photos p SET position=ordered.ordinality-1,
+     is_primary=(ordered.ordinality=1)
+     FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id, ordinality)
+     WHERE p.dish_id=$1 AND p.id=ordered.id`,
+    [dishId, photoIds]
+  );
+  await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [dishId]);
 }
 
 async function withLockedDish(db, id, operation) {
@@ -184,8 +198,9 @@ function createApp(db, { adminToken, corsOrigins = [] }) {
         if (count.total >= 10) return 'limit';
         await client.query(
           `INSERT INTO dish_photos
-           (id, dish_id, image_data, original_image_data, is_primary)
-           VALUES ($1, $2, $3, $4, $5)`,
+           (id, dish_id, image_data, original_image_data, is_primary, position)
+           VALUES ($1, $2, $3, $4, $5,
+             (SELECT COALESCE(max(position), -1)+1 FROM dish_photos WHERE dish_id=$2))`,
           [randomUUID(), req.params.id, image, originalImage, count.total === 0]
         );
         await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [req.params.id]);
@@ -243,23 +258,46 @@ function createApp(db, { adminToken, corsOrigins = [] }) {
     res.json(await getDish(db, req.params.id));
   });
 
+  app.patch('/api/dishes/:id/photos/order', requireAdmin, async (req, res) => {
+    const ids = req.body?.photo_ids;
+    if (
+      !isUuid(req.params.id) ||
+      !Array.isArray(ids) ||
+      ids.length > 10 ||
+      !ids.every((id) => typeof id === 'string' && isUuid(id)) ||
+      new Set(ids.map((id) => id.toLowerCase())).size !== ids.length
+    )
+      return res.status(400).json({ error: 'Некорректный порядок фото' });
+    const photoIds = ids.map((id) => id.toLowerCase());
+    const result = await withLockedDish(db, req.params.id, async (client) => {
+      const { rows } = await client.query('SELECT id FROM dish_photos WHERE dish_id=$1', [
+        req.params.id
+      ]);
+      if (rows.length !== photoIds.length || rows.some((photo) => !photoIds.includes(photo.id)))
+        return 'invalid';
+      await applyPhotoOrder(client, req.params.id, photoIds);
+      return true;
+    });
+    if (!result) return res.status(404).json({ error: 'Блюдо не найдено' });
+    if (result === 'invalid')
+      return res.status(400).json({ error: 'Список фото изменился. Откройте блюдо заново' });
+    res.json(await getDish(db, req.params.id));
+  });
+
   app.patch('/api/dishes/:id/photos/:photoId/primary', requireAdmin, async (req, res) => {
     if (!isUuid(req.params.id) || !isUuid(req.params.photoId))
       return res.status(400).json({ error: 'Некорректный ID' });
     const result = await withLockedDish(db, req.params.id, async (client) => {
-      const photo = await client.query('SELECT id FROM dish_photos WHERE id=$1 AND dish_id=$2', [
-        req.params.photoId,
-        req.params.id
-      ]);
-      if (!photo.rowCount) return false;
-      await client.query(
-        'UPDATE dish_photos SET is_primary=false WHERE dish_id=$1 AND is_primary=true',
+      const { rows } = await client.query(
+        'SELECT id FROM dish_photos WHERE dish_id=$1 ORDER BY position, created_at, id',
         [req.params.id]
       );
-      await client.query('UPDATE dish_photos SET is_primary=true WHERE id=$1', [
-        req.params.photoId
+      const photoId = req.params.photoId.toLowerCase();
+      if (!rows.some((photo) => photo.id === photoId)) return false;
+      await applyPhotoOrder(client, req.params.id, [
+        photoId,
+        ...rows.filter((photo) => photo.id !== photoId).map((photo) => photo.id)
       ]);
-      await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [req.params.id]);
       return true;
     });
     if (!result) return res.status(404).json({ error: 'Фото или блюдо не найдено' });
@@ -278,7 +316,7 @@ function createApp(db, { adminToken, corsOrigins = [] }) {
       if (rows[0].is_primary) {
         await client.query(
           `UPDATE dish_photos SET is_primary=true WHERE id=(
-          SELECT id FROM dish_photos WHERE dish_id=$1 ORDER BY created_at, id LIMIT 1)`,
+          SELECT id FROM dish_photos WHERE dish_id=$1 ORDER BY position, created_at, id LIMIT 1)`,
           [req.params.id]
         );
       }

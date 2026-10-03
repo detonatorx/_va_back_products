@@ -36,6 +36,7 @@ API: `http://localhost:3001/api`; проверка БД: `GET /api/health`. В �
 - Ответы с блюдами содержат `photos`: массив `{ id, url, is_primary, can_edit }`, отсортированный главным фото первым. Загруженное фото отдаётся по `GET /api/photos/:id` как JPEG.
 - `POST /api/dishes/:id/photos` — загрузить отредактированную версию полем `photo` и исходник полем `original` (`multipart/form-data`), максимум 10 МБ/файл и 10 фото/блюдо. Сервер проверяет формат, удаляет метаданные и хранит обе версии в PostgreSQL.
 - `GET /api/dishes/:id/photos/:photoId/original` — получить исходник для повторной обрезки, `PUT /api/dishes/:id/photos/:photoId` — заменить отредактированную версию, `POST /api/dishes/:id/photos/:photoId/reset` — восстановить исходное изображение. `PATCH /api/dishes/:id/photos/:photoId/primary` выбирает главное фото, `DELETE /api/dishes/:id/photos/:photoId` удаляет его. Для этих операций нужен токен администратора.
+- `PATCH /api/dishes/:id/photos/order` — сохранить порядок всех фото: `{ "photo_ids": ["uuid", ...] }`. Первое фото становится главным. «Сделать главным» перемещает выбранное фото в начало, сохраняя относительный порядок остальных. После удаления главного его место занимает следующее фото. Миграция порядка выполняется при запуске API.
 
 Тесты: `TEST_DATABASE_URL=postgres://products_app:<пароль>@127.0.0.1:5432/products_test_db npm test`. Если переменная не задана, интеграционный тест пропускается.
 

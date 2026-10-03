@@ -44,6 +44,19 @@ async function migrate(db) {
       'CREATE INDEX IF NOT EXISTS dish_photo_list ON dish_photos (dish_id, created_at, id)'
     );
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY)');
+    await client.query(
+      'ALTER TABLE dish_photos ADD COLUMN IF NOT EXISTS position integer NOT NULL DEFAULT 0'
+    );
+    const orderMigration = await client.query(
+      "INSERT INTO schema_migrations (name) VALUES ('photo-order-v1') ON CONFLICT DO NOTHING"
+    );
+    if (orderMigration.rowCount) {
+      await client.query(`UPDATE dish_photos p SET position=ordered.position FROM (
+        SELECT id, (row_number() OVER (
+          PARTITION BY dish_id ORDER BY is_primary DESC, created_at, id
+        ) - 1)::integer AS position FROM dish_photos
+      ) ordered WHERE p.id=ordered.id`);
+    }
     const { rowCount } = await client.query(
       "INSERT INTO schema_migrations (name) VALUES ('legacy-photo-links-v1') ON CONFLICT DO NOTHING"
     );

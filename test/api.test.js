@@ -153,17 +153,67 @@ test(
       const resetMetadata = await sharp(Buffer.from(await resetBinary.arrayBuffer())).metadata();
       assert.equal(resetMetadata.width, 12);
       assert.equal(resetMetadata.height, 8);
+      const third = await upload(image);
+      const thirdPhoto = (await third.json()).photos[2];
+      const orderUrl = `${base}/dishes/${id}/photos/order`;
+      const reorder = (photoIds, headers = auth) =>
+        fetch(orderUrl, {
+          method: 'PATCH',
+          headers: { ...headers, 'content-type': 'application/json' },
+          body: JSON.stringify({ photo_ids: photoIds })
+        });
+      const order = [thirdPhoto.id, firstPhoto.id, secondPhoto.id];
+      assert.equal((await reorder(order, {})).status, 401);
+      assert.equal((await reorder([firstPhoto.id, firstPhoto.id, secondPhoto.id])).status, 400);
+      assert.equal((await reorder([firstPhoto.id])).status, 400);
+      assert.equal(
+        (await reorder([firstPhoto.id, secondPhoto.id, require('node:crypto').randomUUID()]))
+          .status,
+        400
+      );
+      const reordered = await reorder(order);
+      assert.equal(reordered.status, 200, await reordered.clone().text());
+      const reorderedPhotos = (await reordered.json()).photos;
+      assert.deepEqual(
+        reorderedPhotos.map((photo) => photo.id),
+        order
+      );
+      assert.deepEqual(
+        reorderedPhotos.map((photo) => photo.is_primary),
+        [true, false, false]
+      );
+      // Migration reruns must preserve a manually selected order.
+      await migrate(db);
+      const afterMigration = await (await fetch(`${base}/dishes`)).json();
+      assert.deepEqual(
+        afterMigration.find((item) => item.id === id).photos.map((photo) => photo.id),
+        order
+      );
       const primaryUrl = `${base}/dishes/${id}/photos/${secondPhoto.id}/primary`;
       assert.equal((await fetch(primaryUrl, { method: 'PATCH' })).status, 401);
       const selected = await fetch(primaryUrl, { method: 'PATCH', headers: auth });
-      assert.equal((await selected.json()).photos[0].id, secondPhoto.id);
+      assert.deepEqual(
+        (await selected.json()).photos.map((photo) => photo.id),
+        [secondPhoto.id, thirdPhoto.id, firstPhoto.id]
+      );
       const listed = await (await fetch(`${base}/dishes`)).json();
       assert.equal(listed.find((item) => item.id === id).photos[0].id, secondPhoto.id);
       const removed = await fetch(`${base}/dishes/${id}/photos/${secondPhoto.id}`, {
         method: 'DELETE',
         headers: auth
       });
-      assert.equal((await removed.json()).photos[0].id, firstPhoto.id);
+      const remainingPhotos = (await removed.json()).photos;
+      assert.equal(remainingPhotos[0].id, thirdPhoto.id);
+      assert.equal(remainingPhotos[0].is_primary, true);
+      assert.equal(
+        (
+          await fetch(`${base}/dishes/${id}/photos/${thirdPhoto.id}`, {
+            method: 'DELETE',
+            headers: auth
+          })
+        ).status,
+        200
+      );
       assert.equal((await fetch(`${base}/photos/${secondPhoto.id}`)).status, 404);
       assert.equal(
         (
