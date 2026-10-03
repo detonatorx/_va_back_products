@@ -82,10 +82,21 @@ test(
     })
       .png()
       .toBuffer();
+    const cropped = await sharp({
+      create: { width: 6, height: 6, channels: 3, background: '#2266cc' }
+    })
+      .png()
+      .toBuffer();
+    const recropped = await sharp({
+      create: { width: 4, height: 3, channels: 3, background: '#22cc66' }
+    })
+      .png()
+      .toBuffer();
     let id;
-    const upload = (content, headers = auth) => {
+    const upload = (content, headers = auth, original = content) => {
       const form = new FormData();
       form.append('photo', new Blob([content], { type: 'image/png' }), 'photo.png');
+      form.append('original', new Blob([original], { type: 'image/png' }), 'original.png');
       return fetch(`${base}/dishes/${id}/photos`, { method: 'POST', headers, body: form });
     };
     try {
@@ -97,10 +108,11 @@ test(
       id = (await created.json()).id;
       assert.equal((await upload(image, {})).status, 401);
       assert.equal((await upload(Buffer.from('not an image'))).status, 400);
-      const first = await upload(image);
+      const first = await upload(cropped, auth, image);
       assert.equal(first.status, 201, await first.clone().text());
       const firstPhoto = (await first.json()).photos[0];
       assert.equal(firstPhoto.is_primary, true);
+      assert.equal(firstPhoto.can_edit, true);
       const second = await upload(image);
       assert.equal(second.status, 201);
       const secondPhoto = (await second.json()).photos[1];
@@ -108,10 +120,39 @@ test(
       const binary = await fetch(`${new URL(base).origin}${firstPhoto.url}`);
       assert.equal(binary.status, 200);
       assert.equal(binary.headers.get('content-type'), 'image/jpeg');
-      assert.equal(
-        (await sharp(Buffer.from(await binary.arrayBuffer())).metadata()).format,
-        'jpeg'
-      );
+      const uploadedMetadata = await sharp(Buffer.from(await binary.arrayBuffer())).metadata();
+      assert.equal(uploadedMetadata.format, 'jpeg');
+      assert.equal(uploadedMetadata.width, 6);
+      assert.equal(uploadedMetadata.height, 6);
+      const originalUrl = `${base}/dishes/${id}/photos/${firstPhoto.id}/original`;
+      assert.equal((await fetch(originalUrl)).status, 401);
+      const original = await fetch(originalUrl, { headers: auth });
+      const originalMetadata = await sharp(Buffer.from(await original.arrayBuffer())).metadata();
+      assert.equal(originalMetadata.width, 12);
+      assert.equal(originalMetadata.height, 8);
+      const editForm = new FormData();
+      editForm.append('photo', new Blob([recropped], { type: 'image/png' }), 'photo.png');
+      const edited = await fetch(`${base}/dishes/${id}/photos/${firstPhoto.id}`, {
+        method: 'PUT',
+        headers: auth,
+        body: editForm
+      });
+      assert.equal(edited.status, 200);
+      const editedPhoto = (await edited.json()).photos.find((photo) => photo.id === firstPhoto.id);
+      const editedBinary = await fetch(`${new URL(base).origin}${editedPhoto.url}`);
+      const editedMetadata = await sharp(Buffer.from(await editedBinary.arrayBuffer())).metadata();
+      assert.equal(editedMetadata.width, 4);
+      assert.equal(editedMetadata.height, 3);
+      const reset = await fetch(`${base}/dishes/${id}/photos/${firstPhoto.id}/reset`, {
+        method: 'POST',
+        headers: auth
+      });
+      assert.equal(reset.status, 200);
+      const resetPhoto = (await reset.json()).photos.find((photo) => photo.id === firstPhoto.id);
+      const resetBinary = await fetch(`${new URL(base).origin}${resetPhoto.url}`);
+      const resetMetadata = await sharp(Buffer.from(await resetBinary.arrayBuffer())).metadata();
+      assert.equal(resetMetadata.width, 12);
+      assert.equal(resetMetadata.height, 8);
       const primaryUrl = `${base}/dishes/${id}/photos/${secondPhoto.id}/primary`;
       assert.equal((await fetch(primaryUrl, { method: 'PATCH' })).status, 401);
       const selected = await fetch(primaryUrl, { method: 'PATCH', headers: auth });

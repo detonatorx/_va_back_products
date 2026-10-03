@@ -18,9 +18,14 @@ async function start() {
         .map((origin) => origin.trim())
         .filter(Boolean)
     });
-    const server = app.listen(process.env.PORT || 3001, process.env.HOST || '127.0.0.1', () => {
-      console.log(`API слушает порт ${server.address().port}`);
+    const server = await new Promise((resolve, reject) => {
+      const listener = app.listen(
+        process.env.PORT || 3001,
+        process.env.HOST || '127.0.0.1',
+        (error) => (error ? reject(error) : resolve(listener))
+      );
     });
+    console.log(`API слушает порт ${server.address().port}`);
     async function shutdown() {
       server.close(async () => {
         await db.end();

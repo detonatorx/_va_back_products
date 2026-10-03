@@ -8,13 +8,27 @@ const { validateDish } = require('./validation');
 const columns =
   'd.id, d.name, d.description, d.category, d.image_url, d.price_kopeks, d.is_active, d.created_at, d.updated_at';
 const dishQuery = `SELECT ${columns}, COALESCE((SELECT json_agg(json_build_object(
-  'id', p.id, 'url', CASE WHEN p.external_url <> '' THEN p.external_url ELSE '/api/photos/' || p.id::text END,
-  'is_primary', p.is_primary) ORDER BY p.is_primary DESC, p.created_at, p.id)
+  'id', p.id, 'url', CASE WHEN p.external_url <> '' THEN p.external_url ELSE '/api/photos/' || p.id::text || '?v=' || floor(extract(epoch from p.updated_at) * 1000)::bigint::text END,
+  'is_primary', p.is_primary, 'can_edit', p.original_image_data IS NOT NULL)
+  ORDER BY p.is_primary DESC, p.created_at, p.id)
   FROM dish_photos p WHERE p.dish_id = d.id), '[]'::json) AS photos FROM dishes d`;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 0, parts: 3 }
+  limits: { fileSize: 10 * 1024 * 1024, files: 2, fields: 0, parts: 4 }
 });
+
+async function processImage(buffer) {
+  const source = sharp(buffer, { limitInputPixels: 40000000, failOn: 'error' });
+  const { format } = await source.metadata();
+  if (!['jpeg', 'png', 'webp'].includes(format)) throw new Error('unsupported');
+  const image = await source
+    .rotate()
+    .resize(2000, 2000, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
+  if (image.length > 2 * 1024 * 1024) throw new Error('too-large');
+  return image;
+}
 
 async function getDish(db, id) {
   const { rows } = await db.query(`${dishQuery} WHERE d.id=$1`, [id]);
@@ -126,44 +140,107 @@ function createApp(db, { adminToken, corsOrigins = [] }) {
     res.type('jpeg').set('Cache-Control', 'public, max-age=3600').send(rows[0].image_data);
   });
 
-  app.post('/api/dishes/:id/photos', requireAdmin, upload.single('photo'), async (req, res) => {
-    if (!isUuid(req.params.id)) return res.status(400).json({ error: 'Некорректный ID блюда' });
-    if (!req.file || !['image/jpeg', 'image/png', 'image/webp'].includes(req.file.mimetype)) {
-      return res.status(400).json({ error: 'Выберите фото JPEG, PNG или WebP' });
+  app.get('/api/dishes/:id/photos/:photoId/original', requireAdmin, async (req, res) => {
+    if (!isUuid(req.params.id) || !isUuid(req.params.photoId)) return res.status(404).end();
+    const { rows } = await db.query(
+      `SELECT original_image_data FROM dish_photos
+       WHERE id=$1 AND dish_id=$2 AND original_image_data IS NOT NULL`,
+      [req.params.photoId, req.params.id]
+    );
+    if (!rows.length) return res.status(404).end();
+    res.type('jpeg').set('Cache-Control', 'private, no-store').send(rows[0].original_image_data);
+  });
+
+  app.post(
+    '/api/dishes/:id/photos',
+    requireAdmin,
+    upload.fields([
+      { name: 'photo', maxCount: 1 },
+      { name: 'original', maxCount: 1 }
+    ]),
+    async (req, res) => {
+      if (!isUuid(req.params.id)) return res.status(400).json({ error: 'Некорректный ID блюда' });
+      const photoFile = req.files?.photo?.[0];
+      const originalFile = req.files?.original?.[0] || photoFile;
+      if (!photoFile || !originalFile) {
+        return res.status(400).json({ error: 'Выберите фото JPEG, PNG или WebP' });
+      }
+      let image;
+      let originalImage;
+      try {
+        [image, originalImage] = await Promise.all([
+          processImage(photoFile.buffer),
+          processImage(originalFile.buffer)
+        ]);
+      } catch {
+        return res.status(400).json({ error: 'Не удалось обработать фото' });
+      }
+      const result = await withLockedDish(db, req.params.id, async (client) => {
+        const {
+          rows: [count]
+        } = await client.query('SELECT count(*)::int AS total FROM dish_photos WHERE dish_id=$1', [
+          req.params.id
+        ]);
+        if (count.total >= 10) return 'limit';
+        await client.query(
+          `INSERT INTO dish_photos
+           (id, dish_id, image_data, original_image_data, is_primary)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [randomUUID(), req.params.id, image, originalImage, count.total === 0]
+        );
+        await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [req.params.id]);
+        return true;
+      });
+      if (!result) return res.status(404).json({ error: 'Блюдо не найдено' });
+      if (result === 'limit') return res.status(400).json({ error: 'Не более 10 фото на блюдо' });
+      res.status(201).json(await getDish(db, req.params.id));
     }
-    let image;
-    try {
-      const source = sharp(req.file.buffer, { limitInputPixels: 40000000, failOn: 'error' });
-      const { format } = await source.metadata();
-      if (!['jpeg', 'png', 'webp'].includes(format))
-        return res.status(400).json({ error: 'Неподдерживаемый формат фото' });
-      image = await source
-        .rotate()
-        .resize(2000, 2000, { fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality: 82 })
-        .toBuffer();
-      if (image.length > 2 * 1024 * 1024)
-        return res.status(400).json({ error: 'Фото после обработки слишком велико' });
-    } catch {
-      return res.status(400).json({ error: 'Не удалось обработать фото' });
+  );
+
+  app.put(
+    '/api/dishes/:id/photos/:photoId',
+    requireAdmin,
+    upload.single('photo'),
+    async (req, res) => {
+      if (!isUuid(req.params.id) || !isUuid(req.params.photoId))
+        return res.status(400).json({ error: 'Некорректный ID' });
+      if (!req.file) return res.status(400).json({ error: 'Выберите отредактированное фото' });
+      let image;
+      try {
+        image = await processImage(req.file.buffer);
+      } catch {
+        return res.status(400).json({ error: 'Не удалось обработать фото' });
+      }
+      const result = await withLockedDish(db, req.params.id, async (client) => {
+        const { rowCount } = await client.query(
+          `UPDATE dish_photos SET image_data=$3, updated_at=now()
+           WHERE id=$1 AND dish_id=$2 AND original_image_data IS NOT NULL`,
+          [req.params.photoId, req.params.id, image]
+        );
+        if (!rowCount) return false;
+        await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [req.params.id]);
+        return true;
+      });
+      if (!result) return res.status(404).json({ error: 'Фото или блюдо не найдено' });
+      res.json(await getDish(db, req.params.id));
     }
+  );
+
+  app.post('/api/dishes/:id/photos/:photoId/reset', requireAdmin, async (req, res) => {
+    if (!isUuid(req.params.id) || !isUuid(req.params.photoId))
+      return res.status(400).json({ error: 'Некорректный ID' });
     const result = await withLockedDish(db, req.params.id, async (client) => {
-      const {
-        rows: [count]
-      } = await client.query('SELECT count(*)::int AS total FROM dish_photos WHERE dish_id=$1', [
-        req.params.id
-      ]);
-      if (count.total >= 10) return 'limit';
-      await client.query(
-        'INSERT INTO dish_photos (id, dish_id, image_data, is_primary) VALUES ($1, $2, $3, $4)',
-        [randomUUID(), req.params.id, image, count.total === 0]
+      const { rowCount } = await client.query(
+        `UPDATE dish_photos SET image_data=original_image_data, updated_at=now()
+         WHERE id=$1 AND dish_id=$2 AND original_image_data IS NOT NULL`,
+        [req.params.photoId, req.params.id]
       );
+      if (!rowCount) return false;
       await client.query('UPDATE dishes SET updated_at=now() WHERE id=$1', [req.params.id]);
       return true;
     });
-    if (!result) return res.status(404).json({ error: 'Блюдо не найдено' });
-    if (result === 'limit') return res.status(400).json({ error: 'Не более 10 фото на блюдо' });
-    res.status(201).json(await getDish(db, req.params.id));
+    if (!result) return res.status(404).json({ error: 'Фото или блюдо не найдено' });
+    res.json(await getDish(db, req.params.id));
   });
 
   app.patch('/api/dishes/:id/photos/:photoId/primary', requireAdmin, async (req, res) => {

@@ -21,11 +21,22 @@ async function migrate(db) {
       id uuid PRIMARY KEY,
       dish_id uuid NOT NULL REFERENCES dishes(id) ON DELETE CASCADE,
       image_data bytea,
+      original_image_data bytea,
       external_url varchar(2048) NOT NULL DEFAULT '',
       is_primary boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT photo_source CHECK ((image_data IS NOT NULL AND external_url = '') OR (image_data IS NULL AND external_url <> ''))
     )`);
+    await client.query(
+      'ALTER TABLE dish_photos ADD COLUMN IF NOT EXISTS original_image_data bytea'
+    );
+    await client.query(
+      'ALTER TABLE dish_photos ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()'
+    );
+    await client.query(
+      'UPDATE dish_photos SET original_image_data=image_data WHERE image_data IS NOT NULL AND original_image_data IS NULL'
+    );
     await client.query(
       'CREATE UNIQUE INDEX IF NOT EXISTS dish_photo_primary ON dish_photos (dish_id) WHERE is_primary'
     );
