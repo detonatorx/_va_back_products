@@ -37,3 +37,5 @@ API: `http://localhost:3001/api`; проверка БД: `GET /api/health`. В �
 - `POST /api/dishes/:id/photos` — загрузить файл полем `photo` (`multipart/form-data`), максимум 10 МБ/файл и 10 фото/блюдо; сервер проверяет формат и пересохраняет изображение без метаданных. `PATCH /api/dishes/:id/photos/:photoId/primary` — выбрать главное, `DELETE /api/dishes/:id/photos/:photoId` — удалить фото. Для всех изменений нужен токен администратора.
 
 Тесты: `TEST_DATABASE_URL=postgres://products_app:<пароль>@127.0.0.1:5432/products_test_db npm test`. Если переменная не задана, интеграционный тест пропускается.
+
+Форматирование: `npm run format`; проверка без изменений: `npm run format:check`. Правила заданы в `.prettierrc.json`.

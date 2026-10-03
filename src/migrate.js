@@ -26,10 +26,16 @@ async function migrate(db) {
       created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT photo_source CHECK ((image_data IS NOT NULL AND external_url = '') OR (image_data IS NULL AND external_url <> ''))
     )`);
-    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS dish_photo_primary ON dish_photos (dish_id) WHERE is_primary');
-    await client.query('CREATE INDEX IF NOT EXISTS dish_photo_list ON dish_photos (dish_id, created_at, id)');
+    await client.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS dish_photo_primary ON dish_photos (dish_id) WHERE is_primary'
+    );
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS dish_photo_list ON dish_photos (dish_id, created_at, id)'
+    );
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY)');
-    const { rowCount } = await client.query("INSERT INTO schema_migrations (name) VALUES ('legacy-photo-links-v1') ON CONFLICT DO NOTHING");
+    const { rowCount } = await client.query(
+      "INSERT INTO schema_migrations (name) VALUES ('legacy-photo-links-v1') ON CONFLICT DO NOTHING"
+    );
     if (rowCount) {
       await client.query(`INSERT INTO dish_photos (id, dish_id, external_url, is_primary)
         SELECT gen_random_uuid(), d.id, d.image_url, true FROM dishes d
@@ -45,9 +51,15 @@ async function migrate(db) {
 }
 
 if (require.main === module) {
-  const db = new Pool(process.env.DATABASE_URL ? { connectionString: process.env.DATABASE_URL } : {});
-  migrate(db).then(() => console.log('Миграция выполнена'))
-    .catch((error) => { console.error(error); process.exitCode = 1; })
+  const db = new Pool(
+    process.env.DATABASE_URL ? { connectionString: process.env.DATABASE_URL } : {}
+  );
+  migrate(db)
+    .then(() => console.log('Миграция выполнена'))
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
     .finally(() => db.end());
 }
 
